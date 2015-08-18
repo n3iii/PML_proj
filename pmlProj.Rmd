@@ -1,0 +1,283 @@
+---
+title: "Doing Activities Well"
+author: "Richard G. Mitchell"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup,echo=FALSE,warning=FALSE,message=FALSE}
+#setwd("D:/RWork/Stocks/")
+#setwd('~/R/PLM/project/')
+library(ggplot2)
+library(xtable)
+library(grid)
+library(gridExtra)
+library(caret)
+library(rattle)
+options(xtable.comment = FALSE)
+```
+
+##Introduction
+
+The "Qualitative Activity Recognition of Weight Lifting Exercises", http://groupware.les.inf.puc-rio.br/har, provides data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. Participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+The goal of this project is to predict the manner in which the participants did the exercise. In this project I will look at 5 different tree based models, noting their expected out of sample error, accuracy against test data, and their elapsed time.  I will also show their results against the submission set, **which is not the test data**.
+
+The 5 models I will fit are: a simple tree, a cross validated tree, a bagged tree, a random forest, and a boosted tree.  I will take as many default parameters as possible so that parameter selection does not influence how each model performs.
+
+
+##Data Preparation
+
+```{r prepData,echo=FALSE,warning=FALSE,message=FALSE}
+trainDF = read.csv(file = 'data/pml-training.csv')
+set.seed(31425)
+inTrain = createDataPartition(y=trainDF$classe,p=.6,list=FALSE)
+training = trainDF[inTrain,]
+testing = trainDF[-inTrain,]
+
+training1 = training[sapply(training,function(x) !any(is.na(x)))]
+testing1 = testing[sapply(training,function(x) !any(is.na(x)))]
+training2 = training1[,8:length(training1)]
+testing2 = testing1[,8:length(training1)]
+
+nzv = nearZeroVar(training2[,-ncol(training2)],saveMetrics=FALSE)
+training3 = training2[,-nzv]
+testing3 = testing2[,-nzv]
+corv = cor(training3[,-ncol(training3)])
+hicorv = findCorrelation(corv,0.80)
+training4 = training3[,-hicorv]
+testing4 = testing3[,-hicorv]
+
+```  
+
+The data for training and testing models is stored in the data subdirectory as pml-training.csv.  The submission data is in pml-testing.csv and will be ignored until the end.  
+
+###Creating Training and Test Partitions
+
+After loading pml-training.csv into a data frame, I partition our data set into a training set of `r nrow(training)`, and a test set of `r nrow(testing)`.  This is the result of a 60% split.  At this point each set has `r ncol(training)` columns or variables, including the outcome variable 'classe'.
+
+###Cleaning the Data
+
+All cleaning is performed on the training data set and then applied to the test set.  Four cleaning steps will be applied to the data:
+
+* remove columns with NAs
+* remove administrative columns
+* remove columns with near zero variable
+* remove columns with correlation greater than 80 percent
+
+This may seem an over simplistic approach, but it turns out to be quite adequate for my purpose of comparing models and find some which are quite accurate.  This cleaning reduces the number of columns from `r ncol(training)` to `r ncol(training4)`.  So there are `r ncol(training4)-1` predictors and the outcome column 'classe' which indicates the quality of the activity.
+
+##Modelling Strategy
+
+To model my now prepared training data I will use a Tree, find its expected out of sample error then test it on my test set.  This will form a baseline, but I won't stop there, for I will:
+
+* create a simple tree
+* cross validate the tree
+* bag the tree
+* plant it in a random forest
+* and finally, boost the tree.
+
+At each stage I will determine the expected out of sample error then validate it against the test set.  Obviously, I will be hoping for an improvement in expected error.  Because the training and test sets are drawn randomly from the same population **I will use accuracy as my error measure**.  This is a case of like predicting like.  I will also note the elapsed time it took to run the model.  
+
+Please note that this "tree" approach was inspired by *An Introduction to Statistical Learning* (ISL) in their chapter on Tree-Based Methods, although they did not use caret.
+
+###Simple Tree
+
+
+```{r modelTree,echo=FALSE,warning=FALSE,message=FALSE}
+treeFit = train(classe~.,method='rpart',data=training4)
+treeAcc = treeFit$results[1,2]
+treePred = predict(treeFit,newdata=testing4)
+treeCMat = confusionMatrix(treePred,testing4$classe)
+treeAct = treeCMat$overall[1]
+treeTime = treeFit$times$everything[3]
+```
+
+When I fit the Tree model with no resampling specified, its expected out of sample error (accuracy) is `r treeAcc`.  (If you look at the fit results, apparently there is some bootstrapping going on under the covers.)  When I predict it against the test set the confusion matrix reports and accuracy of `r treeAct`, which is very close to the expected, but not very good.  The following tree is created.
+
+```{r showTree,echo=FALSE,warning=FALSE,message=FALSE}
+fancyRpartPlot(treeFit$finalModel)
+```
+
+###Cross Validated Tree
+
+```{r modelCV,echo=FALSE,warning=FALSE,message=FALSE}
+train_control <- trainControl(method="cv", number=10)
+cvFit = train(classe~.,method='rpart',data=training4,trControl=train_control)
+cvAcc = cvFit$results[1,2]
+cvPred = predict(cvFit,newdata=testing4)
+cvCMat = confusionMatrix(cvPred,testing4$classe)
+cvAct = cvCMat$overall[1]
+cvTime =cvFit$times$everything[3]
+```
+
+
+Once again I will fit the Tree model, but this time I will cross validate it with the training set hoping to see some improvement.  The cross validation I will use is k-fold, with a k of 10.  I chose k-fold over leave one out because of the machine cycles needed to process `r nrow(training2)` observations and also because it gives a better balance of bias and variability.  (See ISL, p.184)
+
+Its expected out of sample error (accuracy) is `r cvAcc`.  Barely any improvement.  And likewise, none in its actual accuracy against the test data, `r cvAct`.  This is probably because the simple tree was not so simple with the automatic bootstrapping.
+
+###Bagging the Tree
+
+```{r modelBag,echo=FALSE,warning=FALSE,message=FALSE}
+bagFit = train(classe~.,method='treebag',data=training4)
+bagAcc = bagFit$results[1,2]
+bagPred = predict(bagFit,newdata=testing4)
+bagCMat = confusionMatrix(bagPred,testing4$classe)
+bagAct = bagCMat$overall[1]
+bagTime = bagFit$times$everything[3]
+```
+
+
+Bagging (bootstrap aggregation) has its own resampling so no cross validation needed here.  At `r bagTime` seconds, the elapsed time was much longer than for the previous two models, but oh the results!  Its expected out of sample error (accuracy) is `r bagAcc`. And its accuracy on the test data did not disappoint, `r bagAct`.
+
+###Planting the Tree in a Random Forest
+
+```{r modelRF,echo=FALSE,warning=FALSE,message=FALSE}
+rfFit = train(classe~.,method='rf',data=training4)
+rfAcc = rfFit$results[1,2]
+rfPred = predict(rfFit,newdata=testing4)
+rfCMat = confusionMatrix(rfPred,testing4$classe)
+rfAct = rfCMat$overall[1]
+rfTime = rfFit$times$everything[3]
+```
+
+Random Forests also use bootstrap resampling so once again no cross validation needed.  They decorrelate trees where bagging does not.  The model fit of the random forest took much longer than bagging, `r rfTime` seconds.  The accuracy did improve over the bagged tree.  Its expected out of sample error is `r rfAcc`. And its accuracy on the test data improved to, `r rfAct`.
+
+###Boosting the Tree
+
+```{r gbmBoost,echo=FALSE,warning=FALSE,message=FALSE}
+gbmFit = train(classe~.,method='gbm',data=training4, verbose=FALSE,trControl=train_control)
+gbmAcc = gbmFit$results[1,2]
+gbmPred = predict(gbmFit,newdata=testing4)
+gbmCMat = confusionMatrix(gbmPred,testing4$classe)
+gbmAct = gbmCMat$overall[1]
+gbmTime = gbmFit$times$everything[3]
+```
+
+Boosting learns incrementally, building on top of what it has already built.  It has a tendancy to overfit the data, if the number of trees and amount of data is overly large.  So I used a k-fold cross validation as suggested by ISL, p.323, to try to reduce that tendancy.  But overfitting still occurred.  It perfectly matched the training set with an expected sample error (accuracy) of `r gbmAcc`.  But against the test data its accuracy of `r gbmAct` was less than bagging and random forests.  Its elapsed time of `r gbmTime` was definitely shorter than random forests' time.
+
+##Conclusion
+
+On this rather simplistically cleaned data, random forests produced the most accurate prediction of the quality of the activity.  But its elapsed time was an order of magnitude longer than Bagging and Bagging was only slightly less accurate.  With my data and my parameters (or lack of parameters) Boosting overfitted resulting in less accuracy on the test data.  
+
+###Accuracy of Models
+
+The following chart plots expected out of sample error (accuracy) and actual accuracy against test data for all five models.
+
+```{r sumPlot,echo=FALSE,warning=FALSE,message=FALSE}
+modVec = c('Tree', 'CV Tree', 'Bagging', 'R Forest', 'Boost')
+expVec = c(treeAcc, cvAcc, bagAcc, rfAcc, gbmAcc)
+actVec = c(treeAct, cvAct, bagAct, rfAct, gbmAct)
+timeVec = c(treeTime, cvTime, bagTime, rfTime, gbmTime)
+lexpVec = rep('expected',5)
+lactVec = rep('actual',5)
+sumDF = data.frame(model=c(modVec,modVec),type=c(lexpVec,lactVec),accuracy=c(expVec,actVec))
+
+xtabDF = xtable(data.frame(Models=modVec,
+                           'Time in Seconds'=timeVec,
+                           'Expected Accuracy'=expVec,
+                           'Actual Accuracy'=actVec))
+
+sumPlot = ggplot(sumDF,aes(x=model,y=accuracy*100,fill=type)) +
+        geom_bar(stat='identity',position='dodge') +
+        xlab('Fitted Models') +
+        ylab('Accuracy Percentage') +
+        ggtitle('Model Comparison')
+```
+
+```{r show_sum,results="asis",echo=FALSE}
+print(xtabDF, type='html')
+```
+
+```{r sumPlotShow,echo=FALSE,warning=FALSE,message=FALSE}
+sumPlot
+```
+
+###Prediction of Models
+
+```{r subData,echo=FALSE,warning=FALSE,message=FALSE}
+submitDF = read.csv(file = 'data/pml-testing.csv')
+submit1 = submitDF[sapply(training,function(x) !any(is.na(x)))]
+submit2 = submit1[,8:length(training1)]
+submit3 = submit2[,-nzv]
+submit4 = submit3[,-hicorv]
+treePredVec = predict(treeFit,newdata=submit4)
+cvPredVec = predict(cvFit,newdata=submit4)
+bagPredVec = predict(bagFit,newdata=submit4)
+rfPredVec = predict(rfFit,newdata=submit4)
+gbmPredVec = predict(gbmFit,newdata=submit4)
+
+subPredDF = data.frame(Tree=treePredVec,
+                       'CV Tree'=cvPredVec,
+                       Bagging=bagPredVec,
+                       'R Forest'=rfPredVec,
+                       Boost=gbmPredVec)
+subPredX = xtable(subPredDF)
+
+```
+
+But what about the submission?  Well, here are the choices that each of the models made.  Bagging and Random Forests are in complete agreement.  Guess who I am going with. 
+
+```{r show_sub,results="asis",echo=FALSE}
+print(subPredX, type='html')
+```
+
+
+##Appendix - R markdown code
+
+If you are thinking about running the code that follows, remember;  with an Intel Core I5 and 16 gig of memory running the latest Ubuntu LTS, this document takes about 45 minutes to knit.
+
+###Data Preparation
+
+```{r setup,eval=FALSE}
+```
+
+```{r prepData,eval=FALSE}
+```
+
+###Simple Tree
+
+```{r modelTree,eval=FALSE}
+```
+
+```{r showTree,eval=FALSE}
+```
+
+###Cross Validated Tree
+
+```{r modelCV,eval=FALSE}
+```
+
+###Bagging the Tree
+
+```{r modelBag,eval=FALSE}
+```
+
+###Planting the Tree in a Random Forest
+
+```{r modelRF,eval=FALSE}
+```
+
+###Boosting the Tree
+
+```{r gbmBoost,eval=FALSE}
+```
+
+###Accuracy of Models
+
+```{r sumPlot,eval=FALSE}
+```
+
+```{r show_sum,eval=FALSE}
+```
+
+```{r sumPlotShow,eval=FALSE}
+```
+
+###Prediction of Models
+
+```{r subData,eval=FALSE}
+```
+
+```{r show_sub,eval=FALSE}
+```
